@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using JetFistGames.Toml.Internal;
 using System.IO;
+using System.Reflection;
 
 namespace JetFistGames.Toml
 {
@@ -23,7 +24,7 @@ namespace JetFistGames.Toml
 			}
 		}
 
-		public static Result<void, TomlError> ReadFile<T>(StringView path, T dest) where T : class
+		public static Result<void, TomlError> ReadFile(StringView path, Object dest)
 		{
 			var file = scope String();
 			let fileReadResult = File.ReadAllText(path, file);
@@ -38,7 +39,7 @@ namespace JetFistGames.Toml
 			return Read(file, dest);
 		}
 
-		public static Result<void, TomlError> Read<T>(StringView input, T dest) where T : class
+		public static Result<void, TomlError> Read(StringView input, Object dest)
 		{
 			let result = Read(input);
 
@@ -49,69 +50,61 @@ namespace JetFistGames.Toml
 			return Read(doc, dest);
 		}
 
-		public static Result<void, TomlError> Read<T>(TomlTableNode doc, T dest) where T : class
+		public static Result<void, TomlError> Read(TomlTableNode doc, Object dest, bool deleteDoc = true)
 		{
-			var fields = dest.GetType().GetFields();
-
-			bool isContract = typeof(T).GetCustomAttribute<DataContractAttribute>() case .Ok;
+			var dataMembers = GetDataMembers(dest.GetType());
 
 			for (let key in doc.Keys)
 			{
-				FieldLoop: for (let field in fields)
+				FieldLoop: for (let dataMember in dataMembers)
 				{
-					StringView fieldName = field.Name;
-					if (fieldName.StartsWith("prop__"))
-						fieldName = StringView(field.Name, 6);
-
-					if (field.GetCustomAttribute<DataMemberAttribute>() case .Ok(let val))
-					{
-						if (val.Name != "")
-							fieldName = StringView(val.Name);
-					}	
-					else if (isContract || fieldName != key || field.GetCustomAttribute<NotDataMemberAttribute>() case .Ok)
+					if (dataMember.Name != key)
 						continue;
 
-					if (IsMatchingType(doc[key].Kind, field.FieldType))
+					if (IsMatchingType(doc[key].Kind, dataMember.FieldInfo.FieldType))
 					{
 						switch (doc[key].Kind)
 						{
 						case .String:
-							field.SetValue(dest, new String(doc[key].GetString().Get()));
+							dataMember.FieldInfo.SetValue(dest, new String(doc[key].GetString().Get()));
 							break FieldLoop;
 						case .Int:
-							field.SetValue(dest, doc[key].GetInt().Get());
+							dataMember.FieldInfo.SetValue(dest, doc[key].GetInt().Get());
 							break FieldLoop;
 						case .Float:
-							field.SetValue(dest, doc[key].GetFloat().Get());
+							dataMember.FieldInfo.SetValue(dest, doc[key].GetFloat().Get());
 							break FieldLoop;
 						case .Bool:
-							field.SetValue(dest, doc[key].GetBool().Get());
+							dataMember.FieldInfo.SetValue(dest, doc[key].GetBool().Get());
 							break FieldLoop;
 						case .Table:
-							field.SetValue(dest, doc[key].GetTable().Get().ToObject());
+							dataMember.FieldInfo.SetValue(dest, doc[key].GetTable().Get().ToObject());
 							break FieldLoop;
 						case .Array:
-							field.SetValue(dest, doc[key].GetString().Get());
+							dataMember.FieldInfo.SetValue(dest, doc[key].GetArray().Get().ToObject());
 							break FieldLoop;
 						case .Datetime:
-							field.SetValue(dest, doc[key].GetString().Get());
+							dataMember.FieldInfo.SetValue(dest, doc[key].GetDatetime().Get());
 							break FieldLoop;
 						}
 					}
 					else if (doc[key].Kind == .Table)
 					{
-						/*var value = field.GetValue(dest).Get();
+						var value = dataMember.FieldInfo.FieldType.CreateObject().Get();
 
 						let table = (TomlTableNode) doc[key];
-						Read(table, *(Object*)value.GetValueData());
-						field.SetValue(dest, value);*/
+						if (Read(table, value, false) case .Err(let err))
+							return .Err(err);
+
+						dataMember.FieldInfo.SetValue(dest, value);
 					}
 				}
-
-				fields.Reset();
 			}
 
-			delete doc;
+			DeleteContainerAndItems!(dataMembers);
+
+			if (deleteDoc)
+				delete doc;
 
 			return .Ok;
 			
@@ -128,6 +121,18 @@ namespace JetFistGames.Toml
 
 				return false;
 			}
+		}
+
+		public static void WriteFile(Object object, StringView path)
+		{
+			var str = scope String();
+			Write(object, str);
+			File.WriteAllText(path, str);
+		}
+
+		public static void Write(Object object, String output)
+		{
+			//var dataMembers = GetDataMembers(typeof(T));
 		}
 
 		public static void Write(TomlTableNode root, String output)
@@ -242,6 +247,102 @@ namespace JetFistGames.Toml
 			}
 
 			output.Append(" }");
+		}
+
+		private static List<DataMember> GetDataMembers(Type type)
+		{
+			var dataMembers = new List<DataMember>();
+			var fields = type.GetFields();
+			bool isContract = type.GetCustomAttribute<DataContractAttribute>() case .Ok;
+
+			for (let field in fields)
+			{
+				StringView fieldName = field.Name;
+				if (fieldName.StartsWith("prop__"))
+					fieldName = StringView(field.Name, 6);
+
+				if (field.GetCustomAttribute<DataMemberAttribute>() case .Ok(let val))
+				{
+					if (val.Name != "")
+						fieldName = StringView(val.Name);
+				}	
+				else if (isContract || field.GetCustomAttribute<NotDataMemberAttribute>() case .Ok)
+					continue;
+
+				dataMembers.Add(new DataMember(fieldName, field));
+			}
+			
+			return dataMembers;
+		}
+
+		/*private void ToTomlNode(Object object, out TomlNode node)
+		{
+			TomlValueType valueType = ?;
+
+			switch (object.GetType())
+			{
+			case typeof(Dictionary<String, Object>):
+				valueType = .Table;
+				break;
+			case typeof(List<Object>):
+				valueType = .Array;
+				break;
+			case typeof(String):
+				valueType = .String;
+				break;
+			case typeof(int):
+				valueType = .Int;
+				break;
+			case typeof(float):
+				valueType = .Float;
+				break;
+			case typeof(bool):
+				valueType = .Bool;
+				break;
+			case typeof(DateTime):
+				valueType = .Datetime;
+				break;
+			default:
+				node = null;
+				return;
+			}
+
+			if (valueType == .Table)
+			{
+				var tableNode = new TomlTableNode();
+				var dict = (Dictionary<String, Object>) object;
+				for (var child in dict)
+				{
+					ToTomlNode(child.value, var valueNode);
+					tableNode.AddChild(child.key, valueNode);
+				}
+			}
+			else if (valueType == .Array)
+			{
+				var arrayNode = new TomlArrayNode();
+				var list = (List<Object>) object;
+				for (var child in list)
+				{
+					ToTomlNode(child, var valueNode);
+					arrayNode.AddChild(valueNode);
+				}
+			}
+			else
+			{
+				node = new TomlValueNode(.)
+			}
+		}*/
+
+		private class DataMember
+		{
+			public String Name = new .() ~ delete _;
+			public FieldInfo FieldInfo;
+
+			public this(StringView name, FieldInfo fieldInfo)
+			{
+				Name.Set(name);
+				FieldInfo = fieldInfo;
+			}
 		}
 	}
 }
